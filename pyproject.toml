@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "numblame"
+version = "0.1.0"
+description = "git blame for numbers: trace any figure in a SQL pipeline back to its source rows."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["duckdb>=1.1", "sqlglot>=25"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+numblame = "numblame.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

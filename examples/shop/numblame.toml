@@ -1,0 +1,13 @@
+# Where the SQL steps live. They run in file-name order; each file is one SELECT
+# and creates a table named after the file (the leading number is dropped).
+steps = "steps"
+
+# Input files. `key` names the column(s) that identify a row. It is optional:
+# without it, rows are identified by their content.
+[sources.orders]
+path = "data/orders.csv"
+key = ["order_id"]
+
+[sources.customers]
+path = "data/customers.csv"
+key = ["customer_id"]

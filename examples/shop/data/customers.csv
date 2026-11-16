@@ -1,0 +1,9 @@
+customer_id,name,region,segment
+C01,Customer 1,North,retail
+C02,Customer 2,South,retail
+C03,Customer 3,South,wholesale
+C04,Customer 4,East,retail
+C05,Customer 5,West,wholesale
+C06,Customer 6,North,wholesale
+C07,Customer 7,East,retail
+C08,Customer 8,West,retail
