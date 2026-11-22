@@ -1,14 +1,26 @@
-"""Command-line interface for numblame."""
+"""Command-line interface for numblame.
+
+Environment variables:
+
+* ``NUMBLAME_PROJECT``: default project folder (overridden by ``-C``).
+* ``NUMBLAME_LOG_LEVEL``: logging level on stderr, e.g. ``INFO`` or ``DEBUG`` (default ``WARNING``).
+"""
 
 from __future__ import annotations
 
 import argparse
+import logging
+import os
 import sys
 from pathlib import Path
+
+import duckdb
 
 from . import __version__
 from .engine import NumblameError, Run, bisect, diff, list_runs, load_project, run, single_row
 from .rewrite import SRC
+
+log = logging.getLogger(__name__)
 
 
 def _table(columns: list[str], rows: list, indent: str = "  ") -> str:
@@ -23,15 +35,37 @@ def _show_row(row: dict) -> str:
     return _table(list(visible), [list(visible.values())])
 
 
+def _positive_int(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"'{text}' is not a whole number") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be at least 1")
+    return value
+
+
+def _configure_logging(verbose: bool) -> None:
+    name = "DEBUG" if verbose else os.environ.get("NUMBLAME_LOG_LEVEL", "WARNING").upper()
+    level = logging.getLevelName(name)
+    if not isinstance(level, int):
+        level = logging.WARNING
+    logging.basicConfig(level=level, format="numblame: %(levelname)s: %(message)s", stream=sys.stderr)
+
+
 def cmd_run(args) -> int:
+    log.info("loading project from %s", args.project)
     project = load_project(args.project)
+    log.info("running %d step(s) over %d source(s)", len(project.steps), len(project.sources))
     run_id = run(project)
     stored = Run(args.project, run_id)
-    print(f"Run {run_id}")
-    for name in stored.sources + stored.steps:
-        count = stored.con.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
-        print(f"  {'source' if name in stored.sources else 'step  '}  {name}: {count} rows")
-    stored.close()
+    try:
+        print(f"Run {run_id}")
+        for name in stored.sources + stored.steps:
+            count = stored.con.execute(f'SELECT count(*) FROM "{name}"').fetchone()[0]
+            print(f"  {'source' if name in stored.sources else 'step  '}  {name}: {count} rows")
+    finally:
+        stored.close()
     return 0
 
 
@@ -41,14 +75,23 @@ def cmd_runs(args) -> int:
         print("No runs yet. Run `numblame run` first.")
     for run_id in runs:
         stored = Run(args.project, run_id)
-        commit = (stored.meta.get("commit") or "")[:10] or "no git commit"
-        print(f"{run_id}  {stored.meta['created']}  {commit}")
-        stored.close()
+        try:
+            commit = (stored.meta.get("commit") or "")[:10] or "no git commit"
+            print(f"{run_id}  {stored.meta['created']}  {commit}")
+        finally:
+            stored.close()
     return 0
 
 
 def cmd_why(args) -> int:
     stored = Run(args.project, args.run)
+    try:
+        return _why(stored, args)
+    finally:
+        stored.close()
+
+
+def _why(stored: Run, args) -> int:
     if args.where is not None:
         if not args.target:
             raise NumblameError("With --where, give the table name: numblame why <table> --where \"...\"")
@@ -82,7 +125,6 @@ def cmd_why(args) -> int:
             print(f"  {step}: {count} row(s){marker}")
     if len(matches) > args.matches:
         print(f"\n{len(matches) - args.matches} more match(es) not shown. Narrow with --table or --where, or raise --matches.")
-    stored.close()
     return 0
 
 
@@ -139,16 +181,22 @@ def _print_diff(result: dict, before_id: str, after_id: str, column: str | None,
 
 
 def cmd_diff(args) -> int:
-    before, after = Run(args.project, args.before), Run(args.project, args.after)
-    result = diff(before, after, args.table, args.where, args.measure)
-    _print_diff(result, before.id, after.id, args.column, args.measure)
-    before.close()
-    after.close()
+    before = Run(args.project, args.before)
+    try:
+        after = Run(args.project, args.after)
+        try:
+            result = diff(before, after, args.table, args.where, args.measure)
+            _print_diff(result, before.id, after.id, args.column, args.measure)
+        finally:
+            after.close()
+    finally:
+        before.close()
     return 0
 
 
 def cmd_bisect(args) -> int:
     print(f"Looking for the commit that changed {args.table}.{args.column} between {args.good} and {args.bad}")
+    log.info("bisecting in %s", args.project)
     found = bisect(Path(args.project), args.table, args.column, args.where, args.good, args.bad, log=print)
     print(f"\nFirst commit where the value changed (tested {found['tested']} of {found['candidates'] + 1} commits):")
     print(f"  {found['summary']}")
@@ -163,7 +211,13 @@ def cmd_bisect(args) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="numblame", description="git blame for numbers: trace any figure in a SQL pipeline back to its source rows.")
     parser.add_argument("--version", action="version", version=f"numblame {__version__}")
-    parser.add_argument("-C", "--project", default=".", help="project folder containing numblame.toml (default: current folder)")
+    parser.add_argument(
+        "-C",
+        "--project",
+        default=os.environ.get("NUMBLAME_PROJECT", "."),
+        help="project folder containing numblame.toml (default: $NUMBLAME_PROJECT, else the current folder)",
+    )
+    parser.add_argument("-v", "--verbose", action="store_true", help="log progress to stderr (same as NUMBLAME_LOG_LEVEL=DEBUG)")
     sub = parser.add_subparsers(dest="command", required=True)
 
     sub.add_parser("run", help="run the pipeline with lineage and store the result").set_defaults(func=cmd_run)
@@ -174,8 +228,8 @@ def build_parser() -> argparse.ArgumentParser:
     why.add_argument("--where", help="SQL filter selecting the output row(s), e.g. \"region = 'South'\"")
     why.add_argument("--table", help="only search this table for the value")
     why.add_argument("--run", default="latest", help="run ID, 'latest' or 'prev' (default: latest)")
-    why.add_argument("--limit", type=int, default=10, help="source rows to print per source (default: 10)")
-    why.add_argument("--matches", type=int, default=3, help="matching output rows to explain (default: 3)")
+    why.add_argument("--limit", type=_positive_int, default=10, help="source rows to print per source (default: 10)")
+    why.add_argument("--matches", type=_positive_int, default=3, help="matching output rows to explain (default: 3)")
     why.set_defaults(func=cmd_why)
 
     diff_ = sub.add_parser("diff", help="explain how one output row changed between two runs")
@@ -202,10 +256,15 @@ def main(argv: list[str] | None = None) -> int:
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(errors="replace")
     args = build_parser().parse_args(argv)
+    _configure_logging(args.verbose)
     try:
         return args.func(args)
     except NumblameError as error:
         print(f"numblame: {error}", file=sys.stderr)
+        return 2
+    except duckdb.Error as error:
+        log.debug("database error", exc_info=True)
+        print(f"numblame: database error: {error}", file=sys.stderr)
         return 2
 
 
